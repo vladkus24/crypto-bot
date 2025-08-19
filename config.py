@@ -14,4 +14,4 @@ BIRDEYE_URL = "https://public-api.birdeye.so/defi"
 
 # Настройки
 MIN_BUY_AMOUNT_SOL = 1       # минимум SOL для покупки
-MIN_WALLETS_TRIGGER = 2      # от скольких кошельков шлём сигнал
+MIN_WALLETS_TRIGGER = 1      # от скольких кошельков шлём сигнал
