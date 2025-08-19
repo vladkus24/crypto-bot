@@ -14,34 +14,27 @@ with open("wallets_clean.json", "r", encoding="utf-8") as f:
 bot = Bot(token=TELEGRAM_BOT_TOKEN)
 dp = Dispatcher()
 
-
 async def send_signal(token_name, token_symbol, token_address, market_cap, buyers):
     """Отправка сигнала в канал"""
-    buyers_text = "\n".join([f"{buyer}: {amount} SOL" for buyer, amount in buyers.items()])
-
     msg = f"""
 <b>{len(buyers)} Wallets Have Bought {token_name} ({token_symbol})</b>
 <code>{token_address}</code>
 
-<a href="https://app.axiom.xyz/token/{token_address}">Open on AXIOM</a> | 
-<a href="https://birdeye.so/token/{token_address}?chain=solana">Birdeye</a> | 
-<a href="https://solscan.io/token/{token_address}">Solscan</a>
-
+<a href="https://axiom.trade/meme/{token_address}">Open on AXIOM</a>
 Market Cap: {market_cap}
 
-<b>Buyers:</b>
-{buyers_text}
-"""
+<b>Buyers:</b>"""
+    for buyer, amount in buyers.items():
+        msg += f"\n{buyer}: {amount} SOL"
 
     # Сохраняем сигнал в БД
     try:
-        mc = float(str(market_cap).replace(",", "").replace("K", "000").replace("M", "000000")) if isinstance(market_cap, str) and market_cap != "🚀 Soon after launch" else 0
+        mc = float(str(market_cap).replace(",", "").replace("K","000").replace("M","000000")) if market_cap != "N/A" else 0
         save_signal(token_address, token_name, token_symbol, mc)
-    except Exception as e:
-        print("Ошибка при сохранении сигнала:", e)
+    except Exception:
+        pass
 
     await bot.send_message(CHANNEL_ID, msg, parse_mode="HTML", disable_web_page_preview=True)
-
 
 def get_token_info(mint_address):
     """Получаем имя, символ, маркеткап токена через Birdeye"""
@@ -49,24 +42,18 @@ def get_token_info(mint_address):
     url = f"{BIRDEYE_URL}/token_metadata?address={mint_address}"
     try:
         resp = requests.get(url, headers=headers).json()
-        if "data" not in resp or not resp["data"]:
-            return "Unknown", "???", "🚀 Soon after launch"
-
+        if "data" not in resp:
+            return "Unknown", "???", "N/A"
         data = resp["data"]
         name = data.get("name", "Unknown")
         symbol = data.get("symbol", "???")
-        market_cap = data.get("market_cap")
-
+        market_cap = data.get("market_cap", "N/A")
         if isinstance(market_cap, (int, float)):
             market_cap = f"{market_cap:,.0f}"
-        else:
-            market_cap = "🚀 Soon after launch"
-
         return name, symbol, market_cap
     except Exception as e:
         print("Ошибка при получении данных из Birdeye:", e)
-        return "Unknown", "???", "🚀 Soon after launch"
-
+        return "Unknown", "???", "N/A"
 
 async def monitor():
     seen_signatures = set()
@@ -138,7 +125,6 @@ async def monitor():
 
         await asyncio.sleep(10)  # каждые 10 секунд проверяем
 
-
 @dp.message(Command("stats"))
 async def stats_handler(message: types.Message):
     """Выдаёт ТОП-10 сигналов по росту маркет-капа"""
@@ -147,7 +133,7 @@ async def stats_handler(message: types.Message):
 
     for addr, name, symbol, cap_signal, ts in signals:
         token_name, token_symbol, cap_now = get_token_info(addr)
-        if cap_now == "🚀 Soon after launch" or cap_signal == 0:
+        if cap_now == "N/A" or cap_signal == 0:
             continue
         try:
             cap_now_val = float(str(cap_now).replace(",", ""))
@@ -168,19 +154,19 @@ async def stats_handler(message: types.Message):
 
     await message.answer(msg, parse_mode="HTML")
 
-
 async def main():
     init_db()
+    asyncio.create_task(monitor())
+    await dp.start_polling(bot)
 
+    init_db()
     # Регистрируем команды
     await bot.set_my_commands([
         types.BotCommand(command="stats", description="Показать ТОП-10 сигналов")
     ])
 
-    # Запускаем мониторинг и бота
     asyncio.create_task(monitor())
     await dp.start_polling(bot)
-
 
 if __name__ == "__main__":
     asyncio.run(main())
