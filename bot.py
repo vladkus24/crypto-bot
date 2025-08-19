@@ -1,9 +1,11 @@
 import json
 import requests
-from aiogram import Bot, Dispatcher
 import asyncio
 from collections import defaultdict
-from config import TELEGRAM_BOT_TOKEN, CHANNEL_ID, HELIUS_URL, BIRDEYE_API_KEY, BIRDEYE_URL, MIN_BUY_AMOUNT_SOL, MIN_WALLETS_TRIGGER
+from aiogram import Bot, Dispatcher, types
+from aiogram.filters import Command
+from config import TELEGRAM_BOT_TOKEN, CHANNEL_ID, HELIUS_URL, MIN_BUY_AMOUNT_SOL, MIN_WALLETS_TRIGGER, BIRDEYE_API_KEY, BIRDEYE_URL
+from database import init_db, save_signal, get_all_signals
 
 # Загружаем кошельки
 with open("wallets_clean.json", "r", encoding="utf-8") as f:
@@ -18,13 +20,19 @@ async def send_signal(token_name, token_symbol, token_address, market_cap, buyer
 <b>{len(buyers)} Wallets Have Bought {token_name} ({token_symbol})</b>
 <code>{token_address}</code>
 
-<a href="https://app.axiom.xyz/token/{token_address}">Open on AXIOM</a>
+<a href="https://axiom.trade/meme/{token_address}">Open on AXIOM</a>
 Market Cap: {market_cap}
 
-<b>Buyers:</b>
-""" 
+<b>Buyers:</b>"""
     for buyer, amount in buyers.items():
         msg += f"\n{buyer}: {amount} SOL"
+
+    # Сохраняем сигнал в БД
+    try:
+        mc = float(str(market_cap).replace(",", "").replace("K","000").replace("M","000000")) if market_cap != "N/A" else 0
+        save_signal(token_address, token_name, token_symbol, mc)
+    except Exception:
+        pass
 
     await bot.send_message(CHANNEL_ID, msg, parse_mode="HTML", disable_web_page_preview=True)
 
@@ -32,16 +40,20 @@ def get_token_info(mint_address):
     """Получаем имя, символ, маркеткап токена через Birdeye"""
     headers = {"X-API-KEY": BIRDEYE_API_KEY}
     url = f"{BIRDEYE_URL}/token_metadata?address={mint_address}"
-    resp = requests.get(url, headers=headers).json()
-    if "data" not in resp:
+    try:
+        resp = requests.get(url, headers=headers).json()
+        if "data" not in resp:
+            return "Unknown", "???", "N/A"
+        data = resp["data"]
+        name = data.get("name", "Unknown")
+        symbol = data.get("symbol", "???")
+        market_cap = data.get("market_cap", "N/A")
+        if isinstance(market_cap, (int, float)):
+            market_cap = f"{market_cap:,.0f}"
+        return name, symbol, market_cap
+    except Exception as e:
+        print("Ошибка при получении данных из Birdeye:", e)
         return "Unknown", "???", "N/A"
-    data = resp["data"]
-    name = data.get("name", "Unknown")
-    symbol = data.get("symbol", "???")
-    market_cap = data.get("market_cap", "N/A")
-    if isinstance(market_cap, (int, float)):
-        market_cap = f"{market_cap:,.0f}"
-    return name, symbol, market_cap
 
 async def monitor():
     seen_signatures = set()
@@ -59,6 +71,7 @@ async def monitor():
                 resp = requests.post(HELIUS_URL, json=payload).json()
                 if "result" not in resp:
                     continue
+
                 for tx in resp["result"]:
                     sig = tx["signature"]
                     if sig in seen_signatures:
@@ -81,7 +94,7 @@ async def monitor():
                     if not meta:
                         continue
 
-                    # Проверяем изменение баланса SOL
+                    # Проверяем изменение SOL
                     pre_bal = meta.get("preBalances", [])[0] if meta.get("preBalances") else 0
                     post_bal = meta.get("postBalances", [])[0] if meta.get("postBalances") else 0
                     sol_change = (pre_bal - post_bal) / 1e9
@@ -98,21 +111,60 @@ async def monitor():
                     if not token_address:
                         continue
 
-                    # Добавляем покупку
+                    # Сохраняем покупку
                     token_buys[token_address][name] = round(sol_change, 3)
 
-                    # Если купило >= MIN_WALLETS_TRIGGER разных кошельков → сигнал
+                    # Если купило ≥ MIN_WALLETS_TRIGGER → сигнал
                     if len(token_buys[token_address]) >= MIN_WALLETS_TRIGGER:
                         token_name, token_symbol, market_cap = get_token_info(token_address)
                         await send_signal(token_name, token_symbol, token_address, market_cap, token_buys[token_address])
                         token_buys[token_address] = {}  # сбрасываем после сигнала
 
             except Exception as e:
-                print("Ошибка при опросе:", e)
+                print("Ошибка при опросе Helius:", e)
 
-        await asyncio.sleep(10)  # каждые 10 секунд
+        await asyncio.sleep(10)  # каждые 10 секунд проверяем
+
+@dp.message(Command("stats"))
+async def stats_handler(message: types.Message):
+    """Выдаёт ТОП-10 сигналов по росту маркет-капа"""
+    signals = get_all_signals()
+    results = []
+
+    for addr, name, symbol, cap_signal, ts in signals:
+        token_name, token_symbol, cap_now = get_token_info(addr)
+        if cap_now == "N/A" or cap_signal == 0:
+            continue
+        try:
+            cap_now_val = float(str(cap_now).replace(",", ""))
+            x = cap_now_val / cap_signal if cap_signal > 0 else 0
+            results.append((token_name, token_symbol, cap_signal, cap_now_val, x))
+        except:
+            continue
+
+    results = sorted(results, key=lambda x: x[4], reverse=True)[:10]
+
+    if not results:
+        await message.answer("Пока нет сохранённых сигналов 📉")
+        return
+
+    msg = "📊 <b>ТОП-10 сигналов</b>\n"
+    for i, (name, symbol, cap1, cap2, x) in enumerate(results, start=1):
+        msg += f"\n{i}. {name} ({symbol})\n   {cap1:,.0f} → {cap2:,.0f} (x{x:.2f})"
+
+    await message.answer(msg, parse_mode="HTML")
 
 async def main():
+    init_db()
+    asyncio.create_task(monitor())
+    await dp.start_polling(bot)
+
+    init_db()
+    # Регистрируем команды
+    await bot.set_my_commands([
+        types.BotCommand(command="stats", description="Показать ТОП-10 сигналов")
+    ])
+
     asyncio.create_task(monitor())
     await dp.start_polling(bot)
 
